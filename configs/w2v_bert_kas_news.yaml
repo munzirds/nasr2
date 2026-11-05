@@ -1,0 +1,72 @@
+# ============================================================================
+# Default Configuration: Wav2Vec2-BERT 2.0 on munzirahangar/kas-news-dataset
+# Optimized for Google Colab Pro (NVIDIA A100 40GB/80GB & NVIDIA L4 24GB)
+# ============================================================================
+
+# 1. Model & Dataset
+model_name_or_path: "facebook/w2v-bert-2.0"
+dataset_name: "munzirahangar/kas-news-dataset"
+dataset_split: "train"
+audio_column: "audio"
+text_column: "sentence"
+sampling_rate: 16000
+
+# 2. Deterministic Splitting (90% Train / 5% Validation / 5% Test)
+# Splits are persisted to <output_dir>/artifacts/splits.json so Colab restarts
+# always use the exact same train/validation/test examples.
+val_ratio: 0.05
+test_ratio: 0.05
+seed: 42
+
+# 3. Text & Audio Normalization
+remove_diacritics: false       # false = Diacritic-Aware (DA), true = Diacritic-Agnostic (DG)
+strip_punctuation: true
+min_duration_sec: 0.5
+max_duration_sec: 30.0
+cache_features_to_disk: false  # false = fast on-the-fly extraction (no 30-min up-front disk write)
+
+# 4. w2v-BERT 2.0 Architecture & Regularization
+add_adapter: true              # Recommended convolutional adapter before CTC head
+freeze_base_model: false
+freeze_conformer_layers: 0     # Set e.g. 6 to freeze bottom 6 Conformer blocks for faster convergence
+attention_dropout: 0.1
+hidden_dropout: 0.1
+feat_proj_dropout: 0.0
+mask_time_prob: 0.05
+mask_time_length: 10
+mask_feature_prob: 0.05
+mask_feature_length: 10
+layerdrop: 0.05
+ctc_loss_reduction: "mean"
+ctc_zero_infinity: true        # Prevents NaN gradients if an audio clip has fewer frames than characters
+
+# 5. Persistent Output Directory (Mount Google Drive at /content/drive in Colab)
+output_dir: "/content/drive/MyDrive/nasr2_kashmiri_w2v_bert"
+
+# 6. Optimization & Schedule
+learning_rate: 0.00005         # 5e-5 (well-suited for w2v-bert-2.0 full + adapter fine-tuning)
+weight_decay: 0.01
+warmup_ratio: 0.1
+num_train_epochs: 10.0
+max_steps: -1
+lr_scheduler_type: "cosine"
+max_grad_norm: 1.0
+gradient_checkpointing: true
+dataloader_num_workers: 2
+group_by_length: true
+
+# 7. Fault-Tolerant Checkpointing & Evaluation Cadence
+# Saves every 200 steps (~10-15 mins on A100/L4) so a Colab disconnect loses at most a few minutes.
+save_strategy: "steps"
+save_steps: 200
+eval_strategy: "steps"
+eval_steps: 200
+logging_steps: 25
+save_total_limit: 3
+load_best_model_at_end: true
+metric_for_best_model: "da_wer"
+early_stopping_patience: 8
+auto_resume: true
+push_to_hub: false
+hub_private_repo: true
+

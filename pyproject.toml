@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kas-w2v-bert"
+version = "0.1.0"
+description = "Fault-tolerant Wav2Vec2-BERT 2.0 CTC Fine-Tuning & Evaluation Suite for Kashmiri ASR (Colab Pro Edition)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Munzir Ahangar"}
+]
+dependencies = [
+    "torch>=2.1.0",
+    "torchaudio>=2.1.0",
+    "transformers>=4.41.0",
+    "datasets>=2.19.0",
+    "accelerate>=0.30.0",
+    "evaluate>=0.4.2",
+    "jiwer>=3.0.4",
+    "soundfile>=0.12.1",
+    "librosa>=0.10.1",
+    "pyyaml>=6.0",
+    "huggingface_hub>=0.23.0",
+    "tensorboard>=2.16.0",
+    "tqdm>=4.66.0",
+]
+
+[project.scripts]
+kas-train = "kas_w2v_bert.cli_train:main"
+kas-eval = "kas_w2v_bert.cli_eval:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
