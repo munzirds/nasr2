@@ -3,12 +3,15 @@
 # Optimized for Google Colab Pro (NVIDIA A100 40GB/80GB & NVIDIA L4 24GB)
 # ============================================================================
 
-# 1. Model & Dataset
+# 1. Model & Dataset ("huggingface", "gdrive", or "auto")
 model_name_or_path: "facebook/w2v-bert-2.0"
+dataset_source: "auto"         # "huggingface", "gdrive", or "auto"
 dataset_name: "munzirahangar/kas-news-dataset"
 dataset_split: "train"
+drive_dataset_dir: null        # e.g., "/content/drive/MyDrive/nasr_kashmiri_asr/voicehub_dataset"
+shard_glob: "batch_*"          # Shard pattern inside <drive_dataset_dir>/shards/
 audio_column: "audio"
-text_column: "sentence"
+text_column: "sentence"        # Auto-detects "transcript" or "sentence" automatically
 sampling_rate: 16000
 
 # 2. Deterministic Splitting (90% Train / 5% Validation / 5% Test)

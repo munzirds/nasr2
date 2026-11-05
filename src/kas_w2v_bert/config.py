@@ -20,11 +20,14 @@ except ImportError:
 
 @dataclass
 class TrainingConfig:
-    # Model & Dataset
+    # Model & Dataset Source ("auto", "huggingface", or "gdrive")
     model_name_or_path: str = "facebook/w2v-bert-2.0"
+    dataset_source: str = "auto"  # "auto", "huggingface", or "gdrive"
     dataset_name: str = "munzirahangar/kas-news-dataset"
     dataset_subset: Optional[str] = None
     dataset_split: str = "train"
+    drive_dataset_dir: Optional[str] = None  # e.g., /content/drive/MyDrive/nasr_kashmiri_asr/voicehub_dataset
+    shard_glob: str = "batch_*"
     audio_column: str = "audio"
     text_column: str = "sentence"
     sampling_rate: int = 16000

@@ -81,12 +81,24 @@ class TestVocabAndSplits(unittest.TestCase):
             self.assertTrue(os.path.isfile(vocab_path))
 
     def test_deterministic_splits_persistence(self):
-        from kas_w2v_bert.data import compute_or_load_splits
+        from kas_w2v_bert.data import compute_or_load_splits, resolve_dataset_columns
+
+        audio_c, text_c = resolve_dataset_columns(
+            ["audio_filepath", "normalized_text", "speaker_id"],
+            preferred_audio="audio",
+            preferred_text="sentence",
+        )
+        self.assertEqual(audio_c, "audio_filepath")
+        self.assertEqual(text_c, "normalized_text")
 
         indices = list(range(100))
         with tempfile.TemporaryDirectory() as tmpdir:
-            s1 = compute_or_load_splits(indices, tmpdir, val_ratio=0.1, test_ratio=0.1, seed=42)
-            s2 = compute_or_load_splits(indices, tmpdir, val_ratio=0.1, test_ratio=0.1, seed=42)
+            s1 = compute_or_load_splits(
+                indices, tmpdir, val_ratio=0.1, test_ratio=0.1, seed=42, dataset_name="user/ds1"
+            )
+            s2 = compute_or_load_splits(
+                indices, tmpdir, val_ratio=0.1, test_ratio=0.1, seed=42, dataset_name="user/ds1"
+            )
             self.assertEqual(s1["train"], s2["train"])
             self.assertEqual(s1["validation"], s2["validation"])
             self.assertEqual(s1["test"], s2["test"])
@@ -95,6 +107,26 @@ class TestVocabAndSplits(unittest.TestCase):
             self.assertEqual(len(set(s1["train"]) & set(s1["validation"])), 0)
             self.assertEqual(len(set(s1["train"]) & set(s1["test"])), 0)
             self.assertEqual(len(set(s1["validation"]) & set(s1["test"])), 0)
+
+    def test_discover_drive_shard_dirs(self):
+        from kas_w2v_bert.data import discover_drive_shard_dirs
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shards_dir = os.path.join(tmpdir, "voicehub_dataset", "shards")
+            b0 = os.path.join(shards_dir, "batch_000")
+            b1 = os.path.join(shards_dir, "batch_001")
+            b_incomplete = os.path.join(shards_dir, "batch_002")
+            os.makedirs(b0)
+            os.makedirs(b1)
+            os.makedirs(b_incomplete)  # No state.json inside batch_002!
+
+            with open(os.path.join(b0, "state.json"), "w") as f:
+                f.write("{}")
+            with open(os.path.join(b1, "state.json"), "w") as f:
+                f.write("{}")
+
+            found = discover_drive_shard_dirs(os.path.join(tmpdir, "voicehub_dataset"))
+            self.assertEqual(found, [b0, b1])
 
 
 class TestCheckpointQuarantineAndResumableEval(unittest.TestCase):

@@ -14,6 +14,7 @@ Designed specifically for `munzirahangar/kas-news-dataset` (22,425 utterances, ~
 import io
 import json
 import os
+from pathlib import Path
 import random
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -134,12 +135,50 @@ def decode_audio_dict(
     return arr
 
 
+def resolve_dataset_columns(
+    column_names: List[str],
+    preferred_audio: str = "audio",
+    preferred_text: str = "sentence",
+) -> Tuple[str, str]:
+    """
+    Resolves the audio and text/transcript column names from `column_names`.
+    Uses `preferred_audio` / `preferred_text` if present, otherwise auto-detects common HF ASR names.
+    """
+    audio_col = preferred_audio if preferred_audio in column_names else None
+    if audio_col is None:
+        for candidate in ("audio", "speech", "wav", "audio_filepath", "file"):
+            if candidate in column_names:
+                audio_col = candidate
+                break
+    if audio_col is None:
+        raise ValueError(
+            f"Could not find audio column '{preferred_audio}' in dataset columns: {column_names}. "
+            f"Pass --audio_column <name> explicitly."
+        )
+
+    text_col = preferred_text if preferred_text in column_names else None
+    if text_col is None:
+        for candidate in ("sentence", "transcript", "text", "normalized", "normalized_text", "transcription"):
+            if candidate in column_names:
+                text_col = candidate
+                break
+    if text_col is None:
+        raise ValueError(
+            f"Could not find text column '{preferred_text}' in dataset columns: {column_names}. "
+            f"Pass --text_column <name> explicitly."
+        )
+
+    return audio_col, text_col
+
+
 def compute_or_load_splits(
     valid_indices: List[int],
     artifacts_dir: str,
     val_ratio: float = 0.05,
     test_ratio: float = 0.05,
     seed: int = 42,
+    dataset_name: Optional[str] = None,
+    dataset_subset: Optional[str] = None,
 ) -> Dict[str, List[int]]:
     """
     Deterministically partitions `valid_indices` into `train`, `validation`, and `test` index lists.
@@ -148,12 +187,16 @@ def compute_or_load_splits(
     os.makedirs(artifacts_dir, exist_ok=True)
     splits_path = os.path.join(artifacts_dir, "splits.json")
 
-    metadata_signature = {
+    metadata_signature: Dict[str, Any] = {
         "num_valid_indices": len(valid_indices),
         "val_ratio": val_ratio,
         "test_ratio": test_ratio,
         "seed": seed,
     }
+    if dataset_name:
+        metadata_signature["dataset_name"] = dataset_name
+    if dataset_subset:
+        metadata_signature["dataset_subset"] = dataset_subset
 
     if os.path.exists(splits_path):
         try:
@@ -204,33 +247,174 @@ def compute_or_load_splits(
     }
 
 
+def discover_drive_shard_dirs(
+    drive_ds_dir: str,
+    shard_glob: str = "batch_*",
+) -> List[str]:
+    """
+    Discovers valid Hugging Face Arrow shard directories (`state.json` present) inside:
+    1. `<drive_ds_dir>/shards/<shard_glob>` (standard VoiceHub layout)
+    2. `<drive_ds_dir>/<shard_glob>` (when `drive_ds_dir` points directly to `shards/`)
+    3. `<drive_ds_dir>` itself (if it is a single `save_to_disk` dataset directory)
+    """
+    base_path = Path(drive_ds_dir)
+    if not base_path.exists():
+        raise FileNotFoundError(f"Google Drive dataset path does not exist: {drive_ds_dir}")
+
+    # 1. Check <drive_ds_dir>/shards/batch_*
+    shards_subdir = base_path / "shards"
+    if shards_subdir.is_dir():
+        shard_dirs = sorted(
+            str(p)
+            for p in shards_subdir.glob(shard_glob)
+            if p.is_dir() and (p / "state.json").exists()
+        )
+        if shard_dirs:
+            return shard_dirs
+
+    # 2. Check <drive_ds_dir>/batch_* directly
+    shard_dirs = sorted(
+        str(p)
+        for p in base_path.glob(shard_glob)
+        if p.is_dir() and (p / "state.json").exists()
+    )
+    if shard_dirs:
+        return shard_dirs
+
+    # 3. Check if <drive_ds_dir> itself is a saved Dataset directory
+    if (base_path / "state.json").exists():
+        return [str(base_path)]
+
+    raise FileNotFoundError(
+        f"No valid saved dataset shards (matching '{shard_glob}' with state.json) found in "
+        f"'{shards_subdir}' or '{base_path}'."
+    )
+
+
+def load_gdrive_sharded_dataset(
+    drive_ds_dir: str,
+    shard_glob: str = "batch_*",
+    sampling_rate: int = 16000,
+    preferred_audio_col: str = "audio",
+    preferred_text_col: str = "transcript",
+) -> Tuple[Any, str, str]:
+    """
+    Loads a sharded (or single) dataset from Google Drive using `load_from_disk` and
+    `concatenate_datasets`, validates required columns, and casts the audio column to 16 kHz.
+    """
+    from datasets import Audio, DatasetDict, concatenate_datasets, load_from_disk
+
+    # Handle DatasetDict saved to disk if dataset_dict.json is present
+    base_path = Path(drive_ds_dir)
+    if (base_path / "dataset_dict.json").exists():
+        print(f"--> Loading DatasetDict from Google Drive: {drive_ds_dir}")
+        ds_obj = load_from_disk(str(base_path))
+        if isinstance(ds_obj, DatasetDict):
+            ds = concatenate_datasets(list(ds_obj.values()))
+        else:
+            ds = ds_obj
+    else:
+        shard_dirs = discover_drive_shard_dirs(drive_ds_dir, shard_glob=shard_glob)
+        print(f"--> Loading {len(shard_dirs)} shards from Google Drive ({drive_ds_dir})...")
+        loaded_shards = [load_from_disk(p) for p in shard_dirs]
+        ds = concatenate_datasets(loaded_shards) if len(loaded_shards) > 1 else loaded_shards[0]
+
+    audio_col, text_col = resolve_dataset_columns(
+        list(ds.column_names),
+        preferred_audio=preferred_audio_col,
+        preferred_text=preferred_text_col,
+    )
+    required = {audio_col, text_col}
+    missing = required - set(ds.column_names)
+    if missing:
+        raise ValueError(
+            f"Dataset is missing required columns: {sorted(missing)}. Found: {ds.column_names}"
+        )
+
+    # Explicitly decode/resample audio to the model's required 16 kHz rate
+    ds = ds.cast_column(audio_col, Audio(sampling_rate=sampling_rate))
+    print(f"Audio feature after {sampling_rate // 1000} kHz cast:", ds.features[audio_col])
+    print("Rows:", len(ds))
+    print("Columns:", ds.column_names)
+    print("Features:", ds.features)
+    return ds, audio_col, text_col
+
+
 def load_and_prepare_kas_news_splits(
     cfg: TrainingConfig,
     token: Optional[str] = None,
 ) -> Tuple[Any, Dict[str, List[int]], List[str]]:
     """
-    Loads `munzirahangar/kas-news-dataset`, extracts the text column without decoding audio,
-    filters out any empty normalized transcripts, and returns:
+    Loads an ASR dataset from either:
+      - Google Drive (`cfg.dataset_source == 'gdrive'` or `cfg.drive_dataset_dir` / local path), or
+      - Hugging Face Hub (`cfg.dataset_name`, e.g., `munzirahangar/kas-news-dataset`),
+    extracts and normalizes transcripts without decoding all audio up-front, and returns:
       `(raw_dataset, split_indices_dict, train_texts_for_vocab)`
     """
     from datasets import Audio, load_dataset
 
-    hf_token = resolve_hf_token(token)
-    print(f"--> Loading Hugging Face dataset: '{cfg.dataset_name}' (split='{cfg.dataset_split}')...")
+    source_mode = (cfg.dataset_source or "auto").lower().strip()
+    drive_dir = cfg.drive_dataset_dir
+    if not drive_dir and (
+        source_mode == "gdrive"
+        or os.path.exists(cfg.dataset_name)
+        or cfg.dataset_name.startswith("/content/drive")
+    ):
+        drive_dir = cfg.dataset_name
 
-    ds = load_dataset(
-        cfg.dataset_name,
-        name=cfg.dataset_subset,
-        split=cfg.dataset_split,
-        token=hf_token,
-        cache_dir=cfg.hf_cache_dir,
-    )
+    use_gdrive = source_mode == "gdrive" or (source_mode == "auto" and bool(drive_dir))
 
-    # Keep audio column lazy (decode=False) so we decode on-the-fly with soundfile in DataLoader workers
-    if cfg.audio_column in ds.column_names:
-        ds = ds.cast_column(cfg.audio_column, Audio(sampling_rate=cfg.sampling_rate, decode=False))
+    if use_gdrive:
+        if not drive_dir:
+            raise ValueError(
+                "dataset_source='gdrive' requires --drive_dataset_dir (or passing the Drive path to --dataset_name)."
+            )
+        ds, resolved_audio_col, resolved_text_col = load_gdrive_sharded_dataset(
+            drive_ds_dir=drive_dir,
+            shard_glob=cfg.shard_glob,
+            sampling_rate=cfg.sampling_rate,
+            preferred_audio_col=cfg.audio_column,
+            preferred_text_col=cfg.text_column,
+        )
+        cfg.audio_column = resolved_audio_col
+        cfg.text_column = resolved_text_col
+        dataset_identifier = f"gdrive:{os.path.abspath(drive_dir)}"
+    else:
+        hf_token = resolve_hf_token(token)
+        print(
+            f"--> Loading Hugging Face dataset: '{cfg.dataset_name}' (split='{cfg.dataset_split}')..."
+        )
+        ds = load_dataset(
+            cfg.dataset_name,
+            name=cfg.dataset_subset,
+            split=cfg.dataset_split,
+            token=hf_token,
+            cache_dir=cfg.hf_cache_dir,
+        )
+        resolved_audio_col, resolved_text_col = resolve_dataset_columns(
+            list(ds.column_names),
+            preferred_audio=cfg.audio_column,
+            preferred_text=cfg.text_column,
+        )
+        if resolved_audio_col != cfg.audio_column or resolved_text_col != cfg.text_column:
+            print(
+                f"--> Auto-detected dataset columns: audio_column='{resolved_audio_col}', "
+                f"text_column='{resolved_text_col}'"
+            )
+            cfg.audio_column = resolved_audio_col
+            cfg.text_column = resolved_text_col
 
-    # Fast text-only pass (reads only the Parquet string column, 0 audio bytes decoded)
+        if cfg.audio_column in ds.column_names:
+            ds = ds.cast_column(cfg.audio_column, Audio(sampling_rate=cfg.sampling_rate))
+            print(
+                f"Audio feature after {cfg.sampling_rate // 1000} kHz cast:",
+                ds.features[cfg.audio_column],
+            )
+            print("Rows:", len(ds))
+            print("Columns:", ds.column_names)
+        dataset_identifier = cfg.dataset_name
+
+    # Fast text-only pass (reads only the Arrow/Parquet string column, 0 audio bytes decoded)
     raw_texts: List[str] = ds.select_columns([cfg.text_column])[cfg.text_column]
     valid_indices: List[int] = []
     normalized_texts_map: Dict[int, str] = {}
@@ -255,6 +439,8 @@ def load_and_prepare_kas_news_splits(
         val_ratio=cfg.val_ratio,
         test_ratio=cfg.test_ratio,
         seed=cfg.seed,
+        dataset_name=dataset_identifier,
+        dataset_subset=cfg.dataset_subset,
     )
 
     train_texts = [normalized_texts_map[i] for i in splits["train"]]
